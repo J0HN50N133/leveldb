@@ -6,3 +6,7 @@
 # Build directory.
 build/
 out/
+
+.ccls-cache
+include/leveldb/Testing/Temporary
+Debug
