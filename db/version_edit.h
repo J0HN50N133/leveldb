@@ -15,8 +15,10 @@ namespace leveldb {
 
 class VersionSet;
 
+struct FenceMetaData;
+
 struct FileMetaData {
-  FileMetaData() : refs(0), allowed_seeks(1 << 30), file_size(0) {}
+  FileMetaData() : refs(0), allowed_seeks(1 << 30), file_size(0), smallest(), largest(), fence() {}
 
   int refs;
   int allowed_seeks;  // Seeks allowed until compaction
@@ -24,6 +26,27 @@ struct FileMetaData {
   uint64_t file_size;    // File size in bytes
   InternalKey smallest;  // Smallest internal key served by table
   InternalKey largest;   // Largest internal key served by table
+  FenceMetaData* fence;
+};
+
+/* 
+fence_key is the smallest key served by the fence file. In each level,
+there can be only one fence starting with a given key, so (level, key)
+uniquely identifies a fence.
+*/
+struct FenceMetaData {
+  int refs;
+  int level;
+  uint64_t number_segments;
+  InternalKey fence_key; // fence key is selected before any keys are inserted
+  /* Need not be same as fence_key. Ex: g: 100, smallest: 102 */
+  InternalKey smallest; 
+  InternalKey largest;   // Largest internal key served by table
+  // The list of file numbers that form a part of this fence.
+  std::vector<uint64_t> files;
+  std::vector<FileMetaData*> file_metas;
+  
+  FenceMetaData() : refs(0), level(-1), fence_key(), smallest(), largest(), number_segments(0) { files.clear();}
 };
 
 class VersionEdit {
