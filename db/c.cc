@@ -18,6 +18,7 @@
 #include "leveldb/options.h"
 #include "leveldb/status.h"
 #include "leveldb/write_batch.h"
+#include "leveldb/exception.h"
 
 using leveldb::Cache;
 using leveldb::Comparator;
@@ -354,6 +355,9 @@ void leveldb_writebatch_iterate(const leveldb_writebatch_t* b, void* state,
     }
     void Delete(const Slice& key) override {
       (*deleted_)(state_, key.data(), key.size());
+    }
+    void HandleFence(const Slice& key, unsigned level) override{
+      throw new leveldb::NotImplementedException("");
     }
   };
   H handler;

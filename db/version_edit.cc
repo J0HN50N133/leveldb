@@ -20,7 +20,14 @@ enum Tag {
   kDeletedFile = 6,
   kNewFile = 7,
   // 8 was used for large value refs
-  kPrevLogNumber = 9
+  kPrevLogNumber = 9,
+  kNewFence = 10,
+  kDeletedFence = 11,
+  kFileInsideFence = 12,
+  kNewSentinelFile = 13,
+  kDeletedSentinelFile = 14,
+  kNewCompleteFence = 15,
+  kNewSentinalFileNo = 16,
 };
 
 void VersionEdit::Clear() {
