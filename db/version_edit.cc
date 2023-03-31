@@ -375,6 +375,61 @@ std::string VersionEdit::DebugString() const {
     r.append(" .. ");
     r.append(f.largest.DebugString());
   }
+  // Add guards to the debug string
+  for (DeletedFenceSet::const_iterator iter = deleted_fences_.begin();
+       iter != deleted_fences_.end();
+       ++iter) {
+    r.append("\n  DeleteFence: ");
+    AppendNumberTo(&r, iter->first);
+    r.append(" ");
+    r.append(iter->second.DebugString());
+  }
+
+  for (size_t k = 0; k < config::kNumLevels; k++)
+    for (size_t i = 0; i < new_fences_[k].size(); i++) {
+      const FenceMetaData& g = new_fences_[k][i];
+      r.append("\n  AddFence: ");
+      AppendNumberTo(&r, g.level);
+      r.append(" ");
+      AppendNumberTo(&r, g.number_segments);
+      r.append(" ");
+      r.append(g.fence_key.DebugString());
+      r.append(" ");
+      r.append(g.smallest.DebugString());
+      r.append(" .. ");
+      r.append(g.largest.DebugString());
+      r.append(" Files: ");
+      if (g.number_segments > 0) {
+	for (size_t j = 0; j < g.files.size(); j++) {
+	  AppendNumberTo(&r, g.files[j]);
+	  r.append(" ");
+	}
+      }
+    }
+  r.append("\n");
+
+  for (size_t k = 0; k < config::kNumLevels; k++)
+    for (size_t i = 0; i < new_complete_fences_[k].size(); i++) {
+      const FenceMetaData& g = new_complete_fences_[k][i];
+      r.append("\n  AddCompleteFence: ");
+      AppendNumberTo(&r, g.level);
+      r.append(" ");
+      AppendNumberTo(&r, g.number_segments);
+      r.append(" ");
+      r.append(g.fence_key.DebugString());
+      r.append(" ");
+      r.append(g.smallest.DebugString());
+      r.append(" .. ");
+      r.append(g.largest.DebugString());
+      r.append(" Files: ");
+      if (g.number_segments > 0) {
+    	  for (size_t j = 0; j < g.files.size(); j++) {
+    		  AppendNumberTo(&r, g.files[j]);
+    		  r.append(" ");
+    	  }
+      }
+    }
+  r.append("\n}\n");
   r.append("\n}\n");
   return r;
 }
