@@ -5,6 +5,7 @@
 #include "db/version_edit.h"
 
 #include "db/version_set.h"
+
 #include "util/coding.h"
 
 namespace leveldb {
@@ -27,7 +28,7 @@ enum Tag {
   kNewSentinelFile = 13,
   kDeletedSentinelFile = 14,
   kNewCompleteFence = 15,
-  kNewSentinalFileNo = 16,
+  kNewSentinelFileNo = 16,
 };
 
 void VersionEdit::Clear() {
@@ -44,6 +45,10 @@ void VersionEdit::Clear() {
   compact_pointers_.clear();
   deleted_files_.clear();
   new_files_.clear();
+  for (size_t i = 0; i < config::kNumLevels; i++) {
+    new_fences_[i].clear();
+    sentinel_files_[i].clear();
+  }
 }
 
 void VersionEdit::EncodeTo(std::string* dst) const {
@@ -89,6 +94,46 @@ void VersionEdit::EncodeTo(std::string* dst) const {
     PutLengthPrefixedSlice(dst, f.smallest.Encode());
     PutLengthPrefixedSlice(dst, f.largest.Encode());
   }
+
+  // Encode deleted fences
+  for (const auto& deleted_fences_p_ : deleted_fences_) {
+    PutVarint32(dst, kDeletedFence);
+    PutVarint32(dst, deleted_fences_p_.first);  // level
+    PutLengthPrefixedSlice(dst,
+                           deleted_fences_p_.second.Encode());  // fence key
+  }
+
+  // Encode added fences
+  for (size_t k = 0; k < config::kNumLevels; k++) {
+    for (size_t i = 0; i < new_fences_[k].size(); i++) {
+      const FenceMetaData& f = new_fences_[k][i];
+      PutVarint32(dst, kNewFence);
+      PutVarint32(dst, f.level);  // level
+      PutVarint64(
+          dst,
+          0 /* f.number_segments */);  // We don't write the file information to
+                                       // disk because it will be automatically
+                                       // retrieved from files_ in LogAndApply
+      PutLengthPrefixedSlice(dst, f.fence_key.Encode());
+    }
+  }
+
+  // Encode complete fences
+  for (size_t k = 0; k < config::kNumLevels; k++) {
+    for (size_t i = 0; i < new_complete_fences_[k].size(); i++) {
+      const FenceMetaData& f = new_complete_fences_[k][i];
+      PutVarint32(dst, kNewCompleteFence);
+      PutVarint32(dst, f.level);  // level
+      PutVarint64(dst, 0 /* g.number_segments */);
+      PutLengthPrefixedSlice(dst, f.fence_key.Encode());
+    }
+  }
+
+  for (const auto& deleted_sentinel_files_p : deleted_sentinel_files_) {
+    PutVarint32(dst, kDeletedSentinelFile);
+    PutVarint32(dst, deleted_sentinel_files_p.first);   // level
+    PutVarint64(dst, deleted_sentinel_files_p.second);  // file number
+  }
 }
 
 static bool GetInternalKey(Slice* input, InternalKey* dst) {
@@ -114,14 +159,15 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
   Clear();
   Slice input = src;
   const char* msg = nullptr;
-  uint32_t tag;
+  uint32_t tag, tag2;
 
   // Temporary storage for parsing
   int level;
-  uint64_t number;
+  uint64_t number, fnumber;
   FileMetaData f;
   Slice str;
   InternalKey key;
+  FenceMetaData g;
 
   while (msg == nullptr && GetVarint32(&input, &tag)) {
     switch (tag) {
@@ -181,6 +227,21 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
           msg = "deleted file";
         }
         break;
+      case kDeletedFence:
+        if (GetLevel(&input, &level) && GetInternalKey(&input, &key)) {
+          deleted_fences_.insert(std::make_pair(level, key));
+        } else {
+          msg = "deleted guard";
+        }
+        break;
+
+      case kDeletedSentinelFile:
+        if (GetLevel(&input, &level) && GetVarint64(&input, &number)) {
+          deleted_sentinel_files_.insert(std::make_pair(level, number));
+        } else {
+          msg = "deleted sentinel file";
+        }
+        break;
 
       case kNewFile:
         if (GetLevel(&input, &level) && GetVarint64(&input, &f.number) &&
@@ -190,6 +251,62 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
           new_files_.push_back(std::make_pair(level, f));
         } else {
           msg = "new-file entry";
+        }
+        break;
+      case kNewSentinelFile:
+        if (GetLevel(&input, &level) && GetVarint64(&input, &fnumber)) {
+          sentinel_file_nos_[level].push_back(fnumber);
+        } else {
+          msg = "new-sentinel-file entry";
+        }
+        break;
+
+      case kNewSentinelFileNo:
+        if (GetLevel(&input, &level) && GetVarint64(&input, &f.number) &&
+            GetVarint64(&input, &f.file_size) &&
+            GetInternalKey(&input, &f.smallest) &&
+            GetInternalKey(&input, &f.largest)) {
+          new_files_.push_back(std::make_pair(level, f));
+        } else {
+          msg = "new-sentinel-file entry";
+        }
+        break;
+      case kNewFence:
+        if (GetLevel(&input, &g.level) &&
+            GetVarint64(&input, &g.number_segments) &&
+            GetInternalKey(&input, &g.fence_key)) {
+          /* Gather all the files inside the fence. */
+          g.files.clear();
+          if (g.number_segments > 0) {
+            assert(GetInternalKey(&input, &g.smallest) &&
+                   GetInternalKey(&input, &g.largest));
+            for (size_t j = 0; j < g.number_segments; j++) {
+              GetVarint32(&input, &tag2);
+              assert(tag2 == kFileInsideFence);
+              GetVarint64(&input, &fnumber);
+              g.files.push_back(fnumber);
+            }
+          }
+          new_fences_[g.level].push_back(g);
+        } else {
+          msg = "new-fence entry";
+        }
+        break;
+
+      case kNewCompleteFence:
+        if (GetLevel(&input, &g.level) &&
+            GetVarint64(&input, &g.number_segments) &&
+            GetInternalKey(&input, &g.fence_key)) {
+          /* Gather all the files inside the fence. */
+          g.files.clear();
+          // For complete fences, we do not decode the individual file details
+          if (g.number_segments > 0) {
+            assert(GetInternalKey(&input, &g.smallest) &&
+                   GetInternalKey(&input, &g.largest));
+          }
+          new_complete_fences_[g.level].push_back(g);
+        } else {
+          msg = "new-complete-fence entry";
         }
         break;
 
