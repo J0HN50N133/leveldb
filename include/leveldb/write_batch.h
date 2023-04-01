@@ -37,6 +37,7 @@ class LEVELDB_EXPORT WriteBatch {
     virtual ~Handler();
     virtual void Put(const Slice& key, const Slice& value) = 0;
     virtual void Delete(const Slice& key) = 0;
+    virtual void HandleFence(const Slice& key, unsigned level) = 0;
   };
 
   WriteBatch();
@@ -52,6 +53,9 @@ class LEVELDB_EXPORT WriteBatch {
 
   // If the database contains a mapping for "key", erase it.  Else do nothing.
   void Delete(const Slice& key);
+
+  // Store a Fence in the WriteBatch.
+  void PutFence(const Slice& key, int level);
 
   // Clear all updates buffered in this batch.
   void Clear();

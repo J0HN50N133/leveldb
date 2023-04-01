@@ -89,6 +89,7 @@ class WriteBatchItemPrinter : public WriteBatch::Handler {
     dst_->Append(r);
   }
 
+
   WritableFile* dst_;
 };
 
