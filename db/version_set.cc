@@ -4,16 +4,17 @@
 
 #include "db/version_set.h"
 
-#include <algorithm>
-#include <cstdio>
-
 #include "db/filename.h"
 #include "db/log_reader.h"
 #include "db/log_writer.h"
 #include "db/memtable.h"
 #include "db/table_cache.h"
+#include <algorithm>
+#include <cstdio>
+
 #include "leveldb/env.h"
 #include "leveldb/table_builder.h"
+
 #include "table/merger.h"
 #include "table/two_level_iterator.h"
 #include "util/coding.h"
@@ -207,6 +208,203 @@ class Version::LevelFileNumIterator : public Iterator {
   mutable char value_buf_[16];
 };
 
+class Version::LevelFenceNumIterator : public Iterator {
+ public:
+  explicit LevelFenceNumIterator(
+      const InternalKeyComparator& icmp,
+      const std::vector<FenceMetaData*>* glist,
+      const std::vector<FileMetaData*>* sentinel_list,
+      const std::vector<FileMetaData*>* file_list, uint64_t num)
+      : icmp_(icmp),
+        glist_(glist),
+        sentinel_list_(sentinel_list),
+        file_list_(file_list),
+        index_(glist->size()),  // Marks as invalid
+        number_(num),
+        status_(Status::OK()) {}
+
+  ~LevelFenceNumIterator() {}
+
+  virtual bool Valid() const {
+    return index_ < (int)glist_->size() && index_ >= -1;
+  }
+
+  virtual void Seek(const Slice& target) {
+    if (glist_->size() == 0) {  // If there are no guards, setting index_ to -1
+      index_ = -1;
+    } else {
+      index_ = FindFence(icmp_, *glist_, target);
+      if (index_ == 0) {  // If the target is less than first guard key, setting
+                          // index_ to -1 to point to sentinels
+        ParsedInternalKey parsed_key;
+        ParseInternalKey(target, &parsed_key);
+        if (icmp_.user_comparator()->Compare(
+                parsed_key.user_key, glist_->at(0)->fence_key.user_key()) < 0) {
+          index_ = -1;
+        }
+      }
+    }
+    Bump();
+  }
+
+  virtual void SeekToFirst() {
+    index_ =
+        -1;  // Since index of -1 will mean it is pointing to sentinel files
+    Bump();
+  }
+
+  virtual void SeekToLast() {
+    index_ = glist_->size() - 1;
+    BumpReverse();
+  }
+
+  virtual void Next() {
+    assert(Valid());
+    index_++;
+    Bump();
+  }
+
+  virtual void Prev() {
+    assert(Valid());
+    assert(number_ == 0);
+    if (index_ == -1) {
+      index_ = glist_->size();  // Marks as invalid
+    } else {
+      index_--;
+      BumpReverse();
+    }
+  }
+
+  Slice key() const {
+    assert(Valid());
+    if (index_ == -1) {
+      InternalKey largest;
+      // TODO Optimize getting largest value from list of sentinels
+      if (sentinel_list_->size() > 0) {
+        largest = sentinel_list_->at(0)->largest;
+        for (int i = 1; i < sentinel_list_->size(); i++) {
+          if (icmp_.Compare(sentinel_list_->at(i)->largest, largest) > 0) {
+            largest = sentinel_list_->at(i)->largest;
+          }
+        }
+      }
+      return largest.Encode();
+    } else {
+      return (*glist_)[index_]->largest.Encode();
+    }
+  }
+
+  Slice value() const {
+    assert(Valid());
+    std::vector<uint64_t> files;
+    std::vector<uint64_t> file_sizes;
+    uint64_t num_files = 0;
+    if (index_ == -1) {
+      for (int i = 0; i < sentinel_list_->size(); i++) {
+        if (sentinel_list_->at(i)->number > number_) {
+          files.push_back(sentinel_list_->at(i)->number);
+          file_sizes.push_back(sentinel_list_->at(i)->file_size);
+          num_files++;
+        }
+      }
+    } else {
+      for (int i = 0; i < glist_->at(index_)->number_segments; i++) {
+        if (glist_->at(index_)->files[i] > number_) {
+          files.push_back(glist_->at(index_)->files[i]);
+          file_sizes.push_back(glist_->at(index_)->file_metas[i]->file_size);
+          num_files++;
+        }
+      }
+    }
+
+    int num_bytes = 16 * num_files + 8;
+
+    // For each file 16 bytes to store file number and file size and 8 more
+    // bytes to store the number of files (first 8 bytes)
+    EncodeFixed64(value_buf_, num_files);
+    for (int i = 0; i < files.size(); i++) {
+      EncodeFixed64(value_buf_ + i * 16 + 8, files[i]);
+      EncodeFixed64(value_buf_ + i * 16 + 16, file_sizes[i]);
+    }
+    return Slice(value_buf_, num_bytes);
+  }
+
+  virtual Status status() const { return status_; }
+
+ private:
+  LevelFenceNumIterator(const LevelFenceNumIterator&);
+  LevelFenceNumIterator& operator=(const LevelFenceNumIterator&);
+
+  void Bump() {
+    // Handle sentinel files --> Go to guard 0 if either sentinel has no files
+    // or all sentinel files are invalid (> number)
+    if (index_ == -1) {
+      bool valid = false;
+      for (int i = 0; i < sentinel_list_->size(); i++) {
+        if ((*sentinel_list_)[i]->number > number_) {
+          valid = true;
+          break;
+        }
+      }
+      if (!valid) {
+        index_++;
+      } else {
+        return;
+      }
+    }
+    while (index_ < glist_->size()) {
+      bool valid = false;
+      for (int i = 0; glist_->at(index_) != NULL &&
+                      i < glist_->at(index_)->number_segments;
+           i++) {
+        if (glist_->at(index_)->files[i] > number_) {
+          valid = true;
+          break;
+        }
+      }
+      if (valid) {
+        break;
+      }
+      ++index_;
+    }
+  }
+
+  void BumpReverse() {
+    // Handle sentinel files --> Go to guard 0 if either sentinel has no files
+    // or all sentinel files are invalid (> number)
+    while (index_ >= -1) {
+      if (index_ == -1) {
+        for (int i = 0; i < sentinel_list_->size(); i++) {
+          if ((*sentinel_list_)[i]->number > number_) {
+            return;
+          }
+        }
+      } else {
+        for (int i = 0; glist_->at(index_) != NULL &&
+                        i < glist_->at(index_)->number_segments;
+             i++) {
+          if (glist_->at(index_)->files[i] > number_) {
+            return;
+          }
+        }
+      }
+      index_--;
+    }
+  }
+
+  const InternalKeyComparator icmp_;
+  const std::vector<FenceMetaData*>* const glist_;
+  const std::vector<FileMetaData*>* const sentinel_list_;
+  const std::vector<FileMetaData*>* const file_list_;
+  int index_;  // uint32 is not used because index_ can be -1 if it's pointing
+               // to sentinel files
+  uint64_t number_;
+  Status status_;
+
+  // Backing store for value().  Holds the file number and size.
+  mutable char value_buf_[16384];
+};
+
 static Iterator* GetFileIterator(void* arg, const ReadOptions& options,
                                  const Slice& file_value) {
   TableCache* cache = reinterpret_cast<TableCache*>(arg);
@@ -238,6 +436,15 @@ void Version::AddIterators(const ReadOptions& options,
   // walks through the non-overlapping files in the level, opening them
   // lazily.
   for (int level = 1; level < config::kNumLevels; level++) {
+    if (!files_[level].empty()) {
+      iters->push_back(NewConcatenatingIterator(options, level));
+    }
+  }
+}
+void Version::AddSomeIteratorsFences(const ReadOptions& options,
+                                     std::vector<Iterator*>* iters) {
+  // Merge all level all files together since they may overlap
+  for (unsigned level = 0; level < config::kNumLevels; level++) {
     if (!files_[level].empty()) {
       iters->push_back(NewConcatenatingIterator(options, level));
     }

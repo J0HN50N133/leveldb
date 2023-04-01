@@ -45,6 +45,13 @@ class WritableFile;
 int FindFile(const InternalKeyComparator& icmp,
              const std::vector<FileMetaData*>& files, const Slice& key);
 
+// Return the smallest fence file i such that
+// fence[i+1]->fence_key >= key; Return fences.size() if there is no
+// such fence. REQUIRES: "fences" contains a sorted list of fences.
+extern int FindFence(const InternalKeyComparator& icmp,
+		      const std::vector<FenceMetaData*>& fences,
+		      const Slice& key);
+
 // Returns true iff some file in "files" overlaps the user key range
 // [*smallest,*largest].
 // smallest==nullptr represents a key smaller than all keys in the DB.
@@ -68,6 +75,13 @@ class Version {
   // yield the contents of this Version when merged together.
   // REQUIRES: This version has been saved (see VersionSet::SaveTo)
   void AddIterators(const ReadOptions&, std::vector<Iterator*>* iters);
+
+  // Append to *iters a sequence of iterators that will
+  // yield a subset of the contents of this Version when merged together.
+  // Yields only files with number greater or equal to num
+  // REQUIRES: This version has been saved (see VersionSet::SaveTo)
+  // This function is with taking fences into account
+  void AddSomeIteratorsFences(const ReadOptions&, uint64_t num, std::vector<Iterator*>* iters);
 
   // Lookup the value for key.  If found, store it in *val and
   // return OK.  Else return a non-OK status.  Fills *stats.
@@ -97,6 +111,15 @@ class Version {
       const InternalKey* end,    // nullptr means after all keys
       std::vector<FileMetaData*>* inputs);
 
+  // Get overlapping files in guards
+  void GetOverlappingInputsGuards(
+      unsigned level,
+      const InternalKey* begin,         // NULL means before all keys
+      const InternalKey* end,           // NULL means after all keys
+      std::vector<FileMetaData*>* inputs,
+	  std::vector<FenceMetaData*>* guard_inputs,
+	  std::vector<FileMetaData*>* sentinel_inputs);
+
   // Returns true iff some file in the specified level overlaps
   // some part of [*smallest_user_key,*largest_user_key].
   // smallest_user_key==nullptr represents a key smaller than all the DB's keys.
@@ -104,12 +127,21 @@ class Version {
   bool OverlapInLevel(int level, const Slice* smallest_user_key,
                       const Slice* largest_user_key);
 
+  bool OverlapInLevelFences(unsigned level,
+                      const Slice* smallest_user_key,
+                      const Slice* largest_user_key);
+
   // Return the level at which we should place a new memtable compaction
   // result that covers the range [smallest_user_key,largest_user_key].
   int PickLevelForMemTableOutput(const Slice& smallest_user_key,
                                  const Slice& largest_user_key);
 
+  int PickLevelForMemTableOutputFences(const Slice& smallest_user_key,
+                                 const Slice& largest_user_key);
+
   int NumFiles(int level) const { return files_[level].size(); }
+  
+  int NumFences(int level) const { return fences_[level].size(); }
 
   // Return a human readable string that describes this version's contents.
   std::string DebugString() const;
@@ -119,6 +151,7 @@ class Version {
   friend class VersionSet;
 
   class LevelFileNumIterator;
+  class LevelFenceNumIterator;
 
   explicit Version(VersionSet* vset)
       : vset_(vset),
@@ -153,6 +186,17 @@ class Version {
   // List of files per level
   std::vector<FileMetaData*> files_[config::kNumLevels];
 
+  // List of fences per level which are persisted to disk and already committed to a MANIFEST
+  std::vector<FenceMetaData*> fences_[config::kNumLevels];
+  // List of fences per level including the fences which are present in memory (not yet checkpointed)
+  std::vector<FenceMetaData*> complete_fences_[config::kNumLevels];
+  // List of files in the sentinel fence per level - Not persisted to disk
+  std::vector<FileMetaData*> sentinel_files_[config::kNumLevels];
+  // List of sentinel file numbers alone - persisted to disk
+  std::vector<uint64_t> sentinel_file_nos_[config::kNumLevels];
+  // Refers to the number of complete fences persisted in any version
+  int num_complete_fences_[config::kNumLevels];
+  
   // Next file to compact based on seek stats.
   FileMetaData* file_to_compact_;
   int file_to_compact_level_;
@@ -162,6 +206,15 @@ class Version {
   // are initialized by Finalize().
   double compaction_score_;
   int compaction_level_;
+
+
+  // Level that should be compacted next and its compaction score.
+  // Score < 1 means compaction is not strictly needed.  These fields
+  // are initialized by Finalize().
+  std::vector<double> fence_compaction_scores_[config::kNumLevels];
+
+  // To hold the compaction score of sentinel files in each level
+  double sentinel_compaction_scores_[config::kNumLevels];
 };
 
 class VersionSet {
