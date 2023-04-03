@@ -107,6 +107,7 @@ void WriteBatchInternal::SetSequence(WriteBatch* b, SequenceNumber seq) {
   EncodeFixed64(&b->rep_[0], seq);
 }
 
+
 void WriteBatch::Put(const Slice& key, const Slice& value) {
   WriteBatchInternal::SetCount(this, WriteBatchInternal::Count(this) + 1);
   rep_.push_back(static_cast<char>(kTypeValue));
@@ -165,9 +166,9 @@ class MemTableInserter : public WriteBatch::Handler {
   WriteBatch contents.
   - insert it into the Versions structure. 
 */
- class GuardInserter : public WriteBatch::Handler {
+ class FenceInserter : public WriteBatch::Handler {
  public:
-   GuardInserter() : sequence_(), bit_mask(0) {
+   FenceInserter() : sequence_(), bit_mask(0) {
      new_batch = NULL;
      for (int i = 0; i < config::kNumLevels; i++)
        num_guards[i] = 0;
@@ -208,10 +209,11 @@ class MemTableInserter : public WriteBatch::Handler {
     sequence_++;
   }
 
-  virtual void HandleGuard(const Slice& key, unsigned level) {
-    /* vijayc: emptyHandleGuard. */
+  virtual void HandleFence(const Slice& key, unsigned level) {
+    /* emptyHandleGuard. */
     assert(0);
   }
+  virtual ~FenceInserter(){}
    
   void print_all_levels() {
     for (int i = 0; i < config::kNumLevels; i++)
@@ -238,8 +240,8 @@ class MemTableInserter : public WriteBatch::Handler {
      bit_mask = (1 << num_bits) - 1;
    }
    
-  GuardInserter(const GuardInserter&);
-  GuardInserter& operator = (const GuardInserter&);
+  FenceInserter(const FenceInserter&);
+  FenceInserter& operator = (const FenceInserter&);
 };
 }  // namespace
 
@@ -253,6 +255,14 @@ Status WriteBatchInternal::InsertInto(const WriteBatch* b, MemTable* memtable) {
 void WriteBatchInternal::SetContents(WriteBatch* b, const Slice& contents) {
   assert(contents.size() >= kHeader);
   b->rep_.assign(contents.data(), contents.size());
+}
+
+Status WriteBatchInternal::SetFences(const WriteBatch* batch, WriteBatch* new_batch){
+  FenceInserter f_inserter;
+  f_inserter.sequence_ = WriteBatchInternal::Sequence(batch);
+  f_inserter.new_batch = new_batch;
+  Status s = batch->Iterate(&f_inserter);
+  return s;
 }
 
 void WriteBatchInternal::Append(WriteBatch* dst, const WriteBatch* src) {

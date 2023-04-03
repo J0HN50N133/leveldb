@@ -29,6 +29,8 @@ class WriteBatchInternal {
   // this batch.
   static void SetSequence(WriteBatch* batch, SequenceNumber seq);
 
+  static Status SetFences(const WriteBatch*batch, WriteBatch* new_batch);
+
   static Slice Contents(const WriteBatch* batch) { return Slice(batch->rep_); }
 
   static size_t ByteSize(const WriteBatch* batch) { return batch->rep_.size(); }
