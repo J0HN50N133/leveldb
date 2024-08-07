@@ -2,20 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include "db/version_set.h"
 #include <cinttypes>
 #include <cstdio>
 #include <string>
 
-#include "gtest/gtest.h"
-#include "benchmark/benchmark.h"
-#include "db/version_set.h"
 #include "leveldb/comparator.h"
 #include "leveldb/db.h"
 #include "leveldb/env.h"
 #include "leveldb/options.h"
+
 #include "port/port.h"
 #include "util/mutexlock.h"
 #include "util/testutil.h"
+
+#include "benchmark/benchmark.h"
+#include "gtest/gtest.h"
 
 namespace leveldb {
 

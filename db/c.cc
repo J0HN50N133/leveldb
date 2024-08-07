@@ -4,10 +4,9 @@
 
 #include "leveldb/c.h"
 
-#include <string.h>
-
 #include <cstdint>
 #include <cstdlib>
+#include <string.h>
 
 #include "leveldb/cache.h"
 #include "leveldb/comparator.h"
